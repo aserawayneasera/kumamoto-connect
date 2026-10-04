@@ -1,0 +1,37 @@
+import {createRequire} from 'node:module';
+import {readFile,readdir} from 'node:fs/promises';
+import path from 'node:path';
+import assert from 'node:assert/strict';
+const require=createRequire(import.meta.url);
+const wranglerRequire=createRequire(require.resolve('wrangler/package.json'));
+const {Miniflare}=await import(wranglerRequire.resolve('miniflare'));
+const moduleRoot=path.resolve('dist/server');
+const files=(await readdir(moduleRoot,{recursive:true})).filter(file=>/\.m?js$/.test(file)&&file!=='index.js');
+const modules=['index.js',...files].map(file=>({type:'ESModule',path:path.join(moduleRoot,file)}));
+const mf=new Miniflare({modules,modulesRoot:moduleRoot,compatibilityDate:'2026-05-15',compatibilityFlags:['nodejs_compat'],d1Databases:{DB:'kumaconnect-test-db'},bindings:{REVIEWER_EMAILS:'reviewer@example.com',SITE_ORIGIN:'https://test.local'},});
+try{
+ const db=await mf.getD1Database('DB');const sql=(await Promise.all((await readdir('drizzle')).filter(x=>x.endsWith('.sql')).sort().map(x=>readFile('drizzle/'+x,'utf8')))).join('\n');
+ for(const statement of sql.replace(/--> statement-breakpoint/g,'').split(';').map(x=>x.trim()).filter(Boolean))await db.prepare(statement).run();
+ const fetch=(route,options)=>mf.dispatchFetch('https://test.local'+route,options);
+ let response=await fetch('/api/events');if(response.status!==200)console.log('API_FAILURE',response.status,await response.clone().text());assert.equal(response.status,200);let data=await response.json();assert.equal(data.events.length,20);assert.ok(data.events.every(e=>!('contactEmail'in e)&&!('contactName'in e)&&!('reviewNote'in e)));console.log('PASS public event list and private-field exclusion');
+ response=await fetch('/');assert.equal(response.status,200);const html=await response.text();assert.ok(html.includes('What’s happening in Kumamoto?'));assert.ok(html.includes('canada-cafe-en-1008'));console.log('PASS server-rendered browse page');
+ for(const route of ['/submit','/privacy','/events/canada-cafe-en-1008']){response=await fetch(route);assert.equal(response.status,200,route);}console.log('PASS submission, privacy and event routes');
+ response=await fetch('/api/events/canada-cafe-en-1008/calendar?lang=ja');assert.equal(response.status,200);assert.ok((await response.text()).includes('DTSTART:20261008T093000Z'));console.log('PASS calendar endpoint');
+ response=await fetch('/api/review');assert.equal(response.status,403);
+ const owner={'oai-authenticated-user-id':'test-reviewer','oai-authenticated-user-email':'reviewer@example.com'};
+ response=await fetch('/api/review',{headers:{'oai-authenticated-user-id':'intruder','oai-authenticated-user-email':'visitor@example.com'}});assert.equal(response.status,403);console.log('PASS anonymous and non-reviewer authorization');
+ const event={...data.events[0],titleEn:'Integration test activity',titleJa:'動作確認イベント',startAt:new Date(Date.now()+86400000).toISOString(),endAt:new Date(Date.now()+90000000).toISOString()};
+ const payload={event,contactName:'Test organizer',contactEmail:'test@example.com',consent:true,website:''};
+ response=await fetch('/api/submissions',{method:'POST',headers:{'Content-Type':'application/json','Origin':'https://unrelated.example'},body:JSON.stringify(payload)});assert.equal(response.status,403);console.log('PASS cross-origin write rejection');
+ response=await fetch('/api/submissions',{method:'POST',headers:{'Content-Type':'application/json','Origin':'https://test.local'},body:JSON.stringify(payload)});assert.equal(response.status,201);const receipt=await response.json();
+ response=await fetch('/api/events');data=await response.json();assert.equal(data.events.length,20);
+ response=await fetch('/api/events/'+receipt.id+'/calendar');assert.equal(response.status,404);console.log('PASS durable pending submission stays private');
+ response=await fetch('/api/review',{headers:owner});assert.equal(response.status,200);let queue=await response.json();assert.equal(queue.events.length,21);const pending=queue.events.find(e=>e.id===receipt.id);assert.equal(pending.contactEmail,'test@example.com');
+ const decision={id:receipt.id,event:pending,status:'published',confirmed:false};
+ response=await fetch('/api/review',{method:'PATCH',headers:{...owner,'Origin':'https://test.local'},body:JSON.stringify(decision)});assert.equal(response.status,400);
+ decision.confirmed=true;response=await fetch('/api/review',{method:'PATCH',headers:{...owner,'Origin':'https://test.local'},body:JSON.stringify(decision)});assert.equal(response.status,200);
+ response=await fetch('/api/events');data=await response.json();assert.equal(data.events.length,21);assert.ok(!('contactEmail'in data.events.find(e=>e.id===receipt.id)));console.log('PASS protected review and publication with no contact leak');
+ decision.status='archived';response=await fetch('/api/review',{method:'PATCH',headers:{...owner,'Origin':'https://test.local'},body:JSON.stringify(decision)});assert.equal(response.status,200);response=await fetch('/api/events');data=await response.json();assert.equal(data.events.length,20);console.log('PASS archive removes activity from browsing');
+ response=await fetch('/api/submissions',{method:'POST',headers:{'Origin':'https://test.local'},body:JSON.stringify({...payload,event:{...event,bookingUrl:'javascript:alert(1)'}})});assert.equal(response.status,400);console.log('PASS invalid registration URL rejected');
+ console.log('All integration checks passed. Test records exist only in the isolated test database.');
+}finally{await mf.dispose();}

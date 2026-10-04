@@ -1,0 +1,7 @@
+import { z } from "zod";
+import { reviewer,sameOrigin } from "@/lib/auth";
+import { importStatus,runImports } from "@/lib/imports";
+import { aiStatus,savePreferences } from "@/lib/settings";
+export async function GET(){if(!await reviewer())return Response.json({error:"Reviewer access required"},{status:403});try{return Response.json({...await importStatus(),ai:await aiStatus()},{headers:{"Cache-Control":"no-store"}});}catch{return Response.json({error:"Import settings unavailable"},{status:503});}}
+export async function POST(request:Request){if(!sameOrigin(request)||!await reviewer())return Response.json({error:"Reviewer access required"},{status:403});try{return Response.json(await runImports(true));}catch{return Response.json({error:"Import service unavailable"},{status:503});}}
+export async function PATCH(request:Request){if(!sameOrigin(request)||!await reviewer())return Response.json({error:"Reviewer access required"},{status:403});try{const raw=await request.text();if(raw.length>2000)return Response.json({error:"Too large"},{status:413});const p=z.object({provider:z.enum(["openai","claude"]),openaiModel:z.string().regex(/^[a-zA-Z0-9._-]{3,100}$/),claudeModel:z.string().regex(/^[a-zA-Z0-9._-]{3,100}$/),autoPublish:z.boolean(),aiImports:z.boolean(),dailyAiLimit:z.number().int().min(0).max(1000)}).parse(JSON.parse(raw));await savePreferences(p);return Response.json({saved:true});}catch{return Response.json({error:"Check the settings"},{status:400});}}

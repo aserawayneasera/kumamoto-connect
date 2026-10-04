@@ -1,0 +1,3 @@
+import {getEvent} from "@/lib/events";
+import {calendar} from "@/lib/domain";
+export async function GET(request:Request,{params}:{params:Promise<{id:string}>}){try{const {id}=await params;const event=await getEvent(id);if(!event)return new Response("Activity not found",{status:404});if(Date.parse(event.endAt)<=Date.now())return new Response("This session has ended",{status:410});const url=new URL(request.url);const lang=url.searchParams.get("lang")==="ja"?"ja":"en";return new Response(calendar(event,lang,url.origin),{headers:{"Content-Type":"text/calendar; charset=utf-8","Content-Disposition":`attachment; filename="kumaconnect-${event.id}.ics"`,"Cache-Control":"no-store"}});}catch{return new Response("Calendar unavailable",{status:503});}}
